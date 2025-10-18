@@ -37,15 +37,16 @@ logging.Logger.trace = trace
 
 
 class ASAv_vm(vrnetlab.VM):
-    def __init__(self, username, password, install_mode=False):
+    def __init__(self, username, password, conn_mode, install_mode=False):
         for e in os.listdir("/"):
             if re.search(".qcow2$", e):
                 disk_image = "/" + e
 
         super(ASAv_vm, self).__init__(
-            username, password, disk_image=disk_image, ram=2048
+            username, password, disk_image=disk_image, ram=2048, cpu="Nehalem"
         )
         self.nic_type = "e1000"
+        self.conn_mode = conn_mode
         self.install_mode = install_mode
         self.num_nics = 8
 
@@ -124,17 +125,17 @@ class ASAv_vm(vrnetlab.VM):
 
 
 class ASAv(vrnetlab.VR):
-    def __init__(self, username, password):
+    def __init__(self, username, password, conn_mode):
         super(ASAv, self).__init__(username, password)
-        self.vms = [ASAv_vm(username, password)]
+        self.vms = [ASAv_vm(username, password, conn_mode)]
 
 
 class ASAv_installer(ASAv):
     """ASAv installer"""
 
-    def __init__(self, username, password):
-        super(ASAv, self).__init__(username, password)
-        self.vms = [ASAv_vm(username, password, install_mode=True)]
+    def __init__(self, username, password, conn_mode):
+        super(ASAv_installer, self).__init__(username, password, conn_mode)
+        self.vms = [ASAv_vm(username, password, conn_mode, install_mode=True)]
 
     def install(self):
         self.logger.info("Installing ASAv")
@@ -167,8 +168,8 @@ if __name__ == "__main__":
         logger.setLevel(1)
 
     if args.install:
-        vr = ASAv_installer(args.username, args.password)
+        vr = ASAv_installer(args.username, args.password, "tc")
         vr.install()
     else:
-        vr = ASAv(args.username, args.password)
+        vr = ASAv(args.username, args.password, "tc")
         vr.start()
