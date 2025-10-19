@@ -111,15 +111,31 @@ class ASAv_vm(vrnetlab.VM):
         self.wait_write(
             "username %s password %s privilege 15" % (self.username, self.password)
         )
+
+        # Configure management interface
         self.wait_write("interface Management0/0")
         self.wait_write("nameif management")
+        self.wait_write("security-level 100")
         self.wait_write("ip address 10.0.0.15 255.255.255.0")
         self.wait_write("no shutdown")
-        self.wait_write("ssh 0.0.0.0 0.0.0.0 management")
-        self.wait_write("ssh version 2")
+        self.wait_write("exit")
+
+        # Add default route to allow external connectivity
+        self.wait_write("route management 0.0.0.0 0.0.0.0 10.0.0.2 1")
+
+        # Create access-list to allow SSH traffic
+        self.wait_write("access-list MGMT_IN extended permit tcp any any eq ssh")
+        self.wait_write("access-group MGMT_IN in interface management")
+
+        # Configure SSH with ECDSA key generation
+        self.wait_write("crypto key generate ecdsa elliptic-curve 256")
         self.wait_write("ssh key-exchange group dh-group14-sha256")
-        self.wait_write("crypto key generate ecdsa")
-        self.wait_write("write")
+        self.wait_write("ssh 0.0.0.0 0.0.0.0 management")
+        self.wait_write("no ssh stricthostkeycheck")
+        self.wait_write("ssh timeout 60")
+
+        # Save configuration
+        self.wait_write("write memory")
         self.wait_write("end")
         self.wait_write("\r", None)
 
