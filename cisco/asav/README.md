@@ -22,7 +22,7 @@ It's been tested to boot and respond to SSH/telnet with:
 Usage
 -----
 ```
-# Start a container with the ASAv image
+# Start a container with the ASAv image. This can take 5-10 minutes to boot
 docker run -d --privileged --name my-asav-firewall vrnetlab/cisco_asav:9-23-1
 
 # Get the docker container's IP address
@@ -34,7 +34,7 @@ docker logs -f my-asav-firewall
 # After the ASAv has booted, SSH to it using the configured credentials
 ssh vrnetlab@<docker-ip> # password: VR-netlab9
 
-# Alternatively, you can connect to the console with telnet if you have issues with SSH
+# Alternatively, you can connect to the console with telnet
 telnet <docker-ip> 5000
 ```
 
