@@ -9,6 +9,7 @@ import sys
 import time
 
 import vrnetlab
+from scrapli import Scrapli
 
 
 def handle_SIGCHLD(signal, frame):
@@ -59,100 +60,107 @@ class ASAv_vm(vrnetlab.VM):
             self.start()
             return
 
-        (ridx, match, res) = self.con_expect([b"ciscoasa>"], 1)
+        # Check for login/prompt
+        (ridx, match, res) = self.con_expect([b"ciscoasa>"])
         if match:  # got a match!
-            if ridx == 0:  # login
+            if ridx == 0:  # matched prompt
                 if self.install_mode:
-                    self.logger.debug("matched, ciscoasa>")
-                    self.wait_write("", wait=None)
-                    self.wait_write("", None)
-                    self.wait_write("", wait="ciscoasa>")
+                    self.logger.debug("Matched, ciscoasa>")
                     self.running = True
                     return
 
-                self.logger.debug("matched, ciscoasa>")
-                self.wait_write("", wait=None)
+                self.logger.debug("Matched prompt, applying config")
 
-                # run main config!
-                self.apply_config()
+                try:
+                    # run main config!
+                    self.apply_config()
+                    # startup time?
+                    startup_time = datetime.datetime.now() - self.start_time
+                    self.logger.debug("Startup complete in: %s" % startup_time)
+                    # mark as running
+                    self.running = True
+                    return
+                except Exception as e:
+                    self.logger.error(f"Failed to apply config: {e}")
+                    raise
 
-                # startup time?
-                startup_time = datetime.datetime.now() - self.start_time
-                self.logger.debug("Startup complete in: %s" % startup_time)
-                # mark as running
-                self.running = True
-                return
-
-        # no match, if we saw some output from the router it's probably
-        # booting, so let's give it some more time
+        # no match, if we saw some output from the device it's probably booting
         if res != b"":
             self.logger.trace("OUTPUT: %s" % res.decode())
-            # reset spins if we saw some output
-            self.spins = 0
-
+        # no output, and no match -- increment spin count
         self.spins += 1
-
         return
 
     def apply_config(self):
-        """Apply the full configuration"""
+        """Apply the full configuration using Scrapli with proper privilege escalation"""
         self.logger.debug("Applying bootstrap configuration")
-        self.wait_write("enable", wait="ciscoasa>")
-        self.wait_write("VR-netlab9", wait="Enter  Password:")
-        self.wait_write("VR-netlab9", wait="Repeat Password:")
-        self.wait_write("", wait="ciscoasa#")
-        self.wait_write("configure terminal", wait="ciscoasa#")
 
-        # Handle the initial user prompt that appears after configure terminal
-        # The ASA will show a call-home prompt that we need to respond to
-        self.logger.debug("Handling initial user prompt")
-        # Give the prompt time to appear
-        time.sleep(2)
-        # Send 'N' followed by extra carriage return to get back to prompt
-        self.scrapli_tn.channel.write("N\r")
-        # Wait for the response message to complete
-        time.sleep(2)
-        self.scrapli_tn.channel.write("\r")
-        # Wait for prompt to appear
+        # Handle the initial enable password setup using the base telnet connection
+        # This must be done BEFORE commandeering with scrapli
+        self.logger.debug("Setting up initial enable password via telnet")
+        self.scrapli_tn.channel.write("enable\r")
         time.sleep(1)
-        # Read and discard any buffered output to clear the channel
+        self.scrapli_tn.channel.write(f"{self.password}\r") # Enter Password
+        time.sleep(1)
+        self.scrapli_tn.channel.write(f"{self.password}\r") # Repeat Password
+        time.sleep(2)
         _ = self.scrapli_tn.channel.read()
 
-        # Now we should be at config prompt, send first command without waiting
-        self.logger.debug("Setting device access")
-        self.wait_write("aaa authentication ssh console LOCAL", wait=None)
-        self.wait_write("aaa authentication enable console LOCAL")
-        self.wait_write(f"username {self.username} password {self.password} privilege 15")
+        self.logger.debug("Entering configuration mode")
+        self.scrapli_tn.channel.write("configure terminal\r")
+        time.sleep(1)
 
-        self.logger.debug("Configuring management interface")
-        self.wait_write("interface Management0/0")
-        self.wait_write("nameif management")
-        self.wait_write("security-level 100")
-        self.wait_write("ip address 10.0.0.15 255.255.255.0")
-        self.wait_write("no shutdown")
-        self.wait_write("exit")
+        self.logger.debug("Handling call-home prompt")
+        time.sleep(1)
+        self.scrapli_tn.channel.write("N\r")
+        time.sleep(1)
+        self.scrapli_tn.channel.write("\r")
+        time.sleep(1)
+        _ = self.scrapli_tn.channel.read()
 
-        self.logger.debug("Adding default route")
-        self.wait_write("route management 0.0.0.0 0.0.0.0 10.0.0.2 1")
+        # Now that we're in config mode, commandeer with scrapli for better command handling
+        scrapli_timeout = os.getenv("SCRAPLI_TIMEOUT", vrnetlab.DEFAULT_SCRAPLI_TIMEOUT)
+        asa_scrapli_dev = {
+            "platform": "cisco_asa",
+            "host": "127.0.0.1",
+            "auth_bypass": True,
+            "auth_strict_key": False,
+            "auth_secondary": self.password,
+            "timeout_socket": scrapli_timeout,
+            "timeout_transport": scrapli_timeout,
+            "timeout_ops": scrapli_timeout,
+        }
 
-        self.logger.debug("Configuring management access")
-        self.wait_write("access-list MGMT_IN extended permit tcp any any eq ssh")
-        self.wait_write("access-group MGMT_IN in interface management")
+        con = Scrapli(**asa_scrapli_dev)
+        con.commandeer(conn=self.scrapli_tn)
 
-        self.logger.debug("Configuring SSH")
-        self.wait_write("crypto key generate ecdsa elliptic-curve 256")
-        self.wait_write("ssh key-exchange group dh-group14-sha256")
-        self.wait_write("ssh 0.0.0.0 0.0.0.0 management")
-        self.wait_write("no ssh stricthostkeycheck")
-        self.wait_write("ssh timeout 60")
+        # Send configuration commands
+        config_commands = f"""aaa authentication ssh console LOCAL
+aaa authentication enable console LOCAL
+username {self.username} password {self.password} privilege 15
+interface Management0/0
+nameif management
+security-level 100
+ip address 10.0.0.15 255.255.255.0
+no shutdown
+exit
+route management 0.0.0.0 0.0.0.0 10.0.0.2 1
+access-list MGMT_IN extended permit tcp any any eq ssh
+access-group MGMT_IN in interface management
+crypto key generate ecdsa elliptic-curve 256
+ssh key-exchange group dh-group14-sha256
+ssh 0.0.0.0 0.0.0.0 management
+no ssh stricthostkeycheck
+ssh timeout 60"""
 
+        self.logger.debug("Sending configuration commands")
+        con.send_configs(config_commands.splitlines())
         self.logger.debug("Saving configuration")
-        self.wait_write("write memory")
-        self.wait_write("end")
-        self.wait_write("\r", None)
-
-        self.logger.debug("Closing telnet connection")
-        self.scrapli_tn.close()
+        # Exit to privilege exec mode then save
+        con.acquire_priv("privilege_exec")
+        con.send_command("write memory")
+        self.logger.debug("Closing connection")
+        con.close()
 
 
 class ASAv(vrnetlab.VR):
