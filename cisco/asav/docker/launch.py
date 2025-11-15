@@ -6,7 +6,6 @@ import os
 import re
 import signal
 import sys
-import time
 
 import vrnetlab
 from scrapli import Scrapli
@@ -92,34 +91,16 @@ class ASAv_vm(vrnetlab.VM):
         return
 
     def apply_config(self):
-        """Apply the full configuration using Scrapli with proper privilege escalation"""
+        """Apply the full configuration"""
         self.logger.debug("Applying bootstrap configuration")
 
-        # Handle the initial enable password setup using the base telnet connection
-        # This must be done BEFORE commandeering with scrapli
-        self.logger.debug("Setting up initial enable password via telnet")
-        self.scrapli_tn.channel.write("enable\r")
-        time.sleep(1)
-        self.scrapli_tn.channel.write(f"{self.password}\r") # Enter Password
-        time.sleep(1)
-        self.scrapli_tn.channel.write(f"{self.password}\r") # Repeat Password
-        time.sleep(2)
-        _ = self.scrapli_tn.channel.read()
-
-        self.logger.debug("Entering configuration mode")
-        self.scrapli_tn.channel.write("configure terminal\r")
-        time.sleep(1)
-
-        self.logger.debug("Handling call-home prompt")
-        time.sleep(1)
-        self.scrapli_tn.channel.write("N\r")
-        time.sleep(1)
-        self.scrapli_tn.channel.write("\r")
-        time.sleep(1)
-        _ = self.scrapli_tn.channel.read()
-
-        # Now that we're in config mode, commandeer with scrapli for better command handling
         scrapli_timeout = os.getenv("SCRAPLI_TIMEOUT", vrnetlab.DEFAULT_SCRAPLI_TIMEOUT)
+
+        def _open(conn):
+            """Set the internal privilege level to 'exec' so scrapli knows what to do"""
+            conn._current_priv_level = conn.privilege_levels["exec"]
+            self.logger.debug("Set initial privilege level to 'exec' to boostrap configuration")
+
         asa_scrapli_dev = {
             "platform": "cisco_asa",
             "host": "127.0.0.1",
@@ -129,12 +110,33 @@ class ASAv_vm(vrnetlab.VM):
             "timeout_socket": scrapli_timeout,
             "timeout_transport": scrapli_timeout,
             "timeout_ops": scrapli_timeout,
+            "on_open": _open,
         }
 
         con = Scrapli(**asa_scrapli_dev)
         con.commandeer(conn=self.scrapli_tn)
 
-        # Send configuration commands
+        # On fresh ASA, typing 'enable' prompts to set up password
+        self.logger.debug("Setting up initial enable password")
+        result = con.send_interactive(
+            interact_events=[
+                ("enable", r"Password:", False),
+                (self.password, r"Password:", True),
+                # Send an empty character to force the prompt along
+                (self.password, r"", False),
+                ("", r"ciscoasa#", False),
+            ],
+            privilege_level="exec"
+        )
+
+        self.logger.debug("Entering configuration mode to handle reporting prompt")
+        result = con.send_interactive(
+            [
+                ("configure terminal", r"Would you like to enable anonymous error reporting", False),
+                ("N", r"(config)#", False),
+            ]
+        )
+
         config_commands = f"""aaa authentication ssh console LOCAL
 aaa authentication enable console LOCAL
 username {self.username} password {self.password} privilege 15
