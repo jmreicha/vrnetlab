@@ -6,9 +6,9 @@ import os
 import re
 import signal
 import sys
-import time
 
 import vrnetlab
+from scrapli import Scrapli
 
 # ASA has some password complexity requirements
 ENABLE_PASSWORD = "CiscoAsa1!"
@@ -106,72 +106,76 @@ class ASAv_vm(vrnetlab.VM):
     def apply_config(self):
         """Apply the full configuration"""
         self.logger.debug("Applying bootstrap configuration")
-        self.wait_write("enable", wait="ciscoasa>")
-        self.wait_write(ENABLE_PASSWORD, wait="Password:")
-        self.wait_write(ENABLE_PASSWORD, wait="Password:")
-        self.wait_write("", wait="ciscoasa#")
-        self.wait_write("configure terminal", wait="ciscoasa#")
 
-        # Handle the initial user prompt that appears after configure terminal
-        # The ASA will show a call-home prompt that we need to respond to
-        self.logger.debug("Handling initial user prompt")
-        # Give the prompt time to appear
-        time.sleep(2)
-        # Send 'N' followed by extra carriage return to get back to prompt
-        self.scrapli_tn.channel.write("N\r")
-        # Wait for the response message to complete
-        time.sleep(2)
-        self.scrapli_tn.channel.write("\r")
-        # Wait for prompt to appear
-        time.sleep(1)
-        # Read and discard any buffered output to clear the channel
-        _ = self.scrapli_tn.channel.read()
+        scrapli_timeout = os.getenv("SCRAPLI_TIMEOUT", vrnetlab.DEFAULT_SCRAPLI_TIMEOUT)
 
-        # configure the asa hostname
-        self.wait_write(f"hostname {self.hostname}", wait=None)
+        def _open(conn):
+            """Set the internal privilege level to 'exec' so scrapli knows what to do"""
+            conn._current_priv_level = conn.privilege_levels["exec"]
+            self.logger.debug("Set initial privilege level to 'exec' to boostrap configuration")
 
-        # Now we should be at config prompt, send first command without waiting
-        self.logger.debug("Setting device access")
-        self.wait_write("aaa authentication ssh console LOCAL", wait=None)
-        self.wait_write("aaa authentication enable console LOCAL")
-        self.wait_write(
-            f"username {self.username} password {self.password} privilege 15"
+        asa_scrapli_dev = {
+            "platform": "cisco_asa",
+            "host": "127.0.0.1",
+            "auth_bypass": True,
+            "auth_strict_key": False,
+            "auth_secondary": self.password,
+            "timeout_socket": scrapli_timeout,
+            "timeout_transport": scrapli_timeout,
+            "timeout_ops": scrapli_timeout,
+            "on_open": _open,
+        }
+
+        con = Scrapli(**asa_scrapli_dev)
+        con.commandeer(conn=self.scrapli_tn)
+
+        # On fresh ASA, typing 'enable' prompts to set up password
+        self.logger.debug("Setting up initial enable password")
+        result = con.send_interactive(
+            interact_events=[
+                ("enable", r"Password:", False),
+                (self.password, r"Password:", True),
+                # Send an empty character to force the prompt along
+                (self.password, r"", False),
+                ("", r"ciscoasa#", False),
+            ],
+            privilege_level="exec"
         )
 
-        v4_mgmt_address = vrnetlab.cidr_to_ddn(self.mgmt_address_ipv4)
+        self.logger.debug("Entering configuration mode to handle reporting prompt")
+        result = con.send_interactive(
+            [
+                ("configure terminal", r"Would you like to enable anonymous error reporting", False),
+                ("N", r"(config)#", False),
+            ]
+        )
 
-        self.logger.debug("Configuring management interface")
-        self.wait_write("interface Management0/0")
-        self.wait_write("nameif management")
-        self.wait_write("security-level 100")
-        self.wait_write(f"ip address {v4_mgmt_address[0]} {v4_mgmt_address[1]}")
-        self.wait_write(f"ipv6 address {self.mgmt_address_ipv6}")
-        self.wait_write("no shutdown")
-        self.wait_write("exit")
+        config_commands = f"""aaa authentication ssh console LOCAL
+aaa authentication enable console LOCAL
+username {self.username} password {self.password} privilege 15
+interface Management0/0
+nameif management
+security-level 100
+ip address 10.0.0.15 255.255.255.0
+no shutdown
+exit
+route management 0.0.0.0 0.0.0.0 10.0.0.2 1
+access-list MGMT_IN extended permit tcp any any eq ssh
+access-group MGMT_IN in interface management
+crypto key generate ecdsa elliptic-curve 256
+ssh key-exchange group dh-group14-sha256
+ssh 0.0.0.0 0.0.0.0 management
+no ssh stricthostkeycheck
+ssh timeout 60"""
 
-        self.logger.debug("Adding default route")
-        self.wait_write(f"route management 0.0.0.0 0.0.0.0 {self.mgmt_gw_ipv4} 1")
-        self.wait_write(f"route management ::/0 {self.mgmt_gw_ipv6} 1")
-
-        self.logger.debug("Configuring management access")
-        self.wait_write("access-list MGMT_IN extended permit tcp any any eq ssh")
-        self.wait_write("access-group MGMT_IN in interface management")
-
-        self.logger.debug("Configuring SSH")
-        self.wait_write("crypto key generate ecdsa elliptic-curve 256")
-        self.wait_write("ssh key-exchange group dh-group14-sha256")
-        self.wait_write("ssh 0.0.0.0 0.0.0.0 management")
-        self.wait_write("ssh ::/0 management")
-        self.wait_write("no ssh stricthostkeycheck")
-        self.wait_write("ssh timeout 60")
-
+        self.logger.debug("Sending configuration commands")
+        con.send_configs(config_commands.splitlines())
         self.logger.debug("Saving configuration")
-        self.wait_write("write memory")
-        self.wait_write("end")
-        self.wait_write("\r", None)
-
-        self.logger.debug("Closing telnet connection")
-        self.scrapli_tn.close()
+        # Exit to privilege exec mode then save
+        con.acquire_priv("privilege_exec")
+        con.send_command("write memory")
+        self.logger.debug("Closing connection")
+        con.close()
 
 
 class ASAv(vrnetlab.VR):
