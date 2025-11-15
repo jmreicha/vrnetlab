@@ -150,21 +150,27 @@ class ASAv_vm(vrnetlab.VM):
             ]
         )
 
-        config_commands = f"""aaa authentication ssh console LOCAL
+        v4_mgmt_address = vrnetlab.cidr_to_ddn(self.mgmt_address_ipv4)
+
+        config_commands = f"""hostname {self.hostname}
+aaa authentication ssh console LOCAL
 aaa authentication enable console LOCAL
 username {self.username} password {self.password} privilege 15
 interface Management0/0
 nameif management
 security-level 100
-ip address 10.0.0.15 255.255.255.0
+ip address {v4_mgmt_address[0]} {v4_mgmt_address[1]}
+ipv6 address {self.mgmt_address_ipv6}
 no shutdown
 exit
-route management 0.0.0.0 0.0.0.0 10.0.0.2 1
+route management 0.0.0.0 0.0.0.0 {self.mgmt_gw_ipv4} 1
+route management ::/0 {self.mgmt_gw_ipv6} 1
 access-list MGMT_IN extended permit tcp any any eq ssh
 access-group MGMT_IN in interface management
 crypto key generate ecdsa elliptic-curve 256
 ssh key-exchange group dh-group14-sha256
 ssh 0.0.0.0 0.0.0.0 management
+ssh ::/0 management
 no ssh stricthostkeycheck
 ssh timeout 60"""
 
