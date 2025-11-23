@@ -10,6 +10,8 @@ import sys
 import vrnetlab
 from scrapli import Scrapli
 
+STARTUP_CONFIG_FILE = "/config/startup-config.cfg"
+
 # ASA has some password complexity requirements
 ENABLE_PASSWORD = "CiscoAsa1!"
 
@@ -176,6 +178,17 @@ ssh timeout 60"""
 
         self.logger.debug("Sending configuration commands")
         con.send_configs(config_commands.splitlines())
+        
+        # Apply user-provided startup configuration if present
+        if os.path.exists(STARTUP_CONFIG_FILE):
+            self.logger.info("Startup configuration file found")
+            with open(STARTUP_CONFIG_FILE, "r") as config:
+                startup_config = config.read()
+                self.logger.debug("Applying startup configuration")
+                con.send_configs(startup_config.splitlines())
+        else:
+            self.logger.info("User provided startup configuration is not found.")
+        
         self.logger.debug("Saving configuration")
         # Exit to privilege exec mode then save
         con.acquire_priv("privilege_exec")
